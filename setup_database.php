@@ -17,7 +17,7 @@ try {
     $pdo->exec("USE printer_monitoring");
     
     // Create tables
-    $sql = file_get_contents('E:\JOKIAN\DAPA\TA\api-printer\database\setup.sql');
+    $sql = file_get_contents('setup_fixed.sql');
     $pdo->exec($sql);
     
     echo "✅ Tables created successfully!\n";
