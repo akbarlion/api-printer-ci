@@ -32,7 +32,7 @@ composer install
 
 3. Configure database settings in `application/config/database.php`
 
-4. Run database setup:
+4. Run database setup and migration:
 ```bash
 php setup_database.php
 ```
@@ -68,6 +68,7 @@ Update configuration files in `application/config/`:
 - Database: `printer_monitoring`
 - Tables: Users, Printers, PrinterMetrics, PrinterAlerts, SNMPProfiles
 - Setup file: `setup_fixed.sql`
+- Migration script: `setup_database.php` (includes setup + fixes)
 
 ## License
 
