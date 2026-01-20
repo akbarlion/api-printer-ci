@@ -70,8 +70,11 @@ $route['api/alerts/(:num)/acknowledge'] = 'alert/acknowledge/$1';
 $route['api/alerts/(:num)'] = 'alert/delete/$1';
 
 // Printer routes
+$route['api/printers/testsnmp'] = 'printer/test_snmp_oid';
 $route['api/printers/test'] = 'printer/test_connection';
-$route['api/printers/(:num)'] = 'printer/show/$1';
+$route['api/printers/(.+)/details'] = 'printer/details/$1';
+$route['api/printers/(.+)/delete'] = 'printer/delete_by_id/$1';
+$route['api/printers/(.+)'] = 'printer/show/$1';
 $route['api/printers'] = 'printer/index';
 
 // SNMP routes
