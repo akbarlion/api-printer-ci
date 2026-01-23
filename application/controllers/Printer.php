@@ -232,7 +232,7 @@ class Printer extends CI_Controller
         // $this->verify_token();
 
         try {
-            $deleted = $this->Printer_model->soft_delete($id);
+            $deleted = $this->Printer_model->delete($id);
 
             if (!$deleted) {
                 http_response_code(404);
@@ -264,7 +264,12 @@ class Printer extends CI_Controller
             $input = json_decode($this->input->raw_input_stream, true);
 
             $ip_address = $input['ipAddress'] ?? null;
+
+            // Support both formats: direct community or in snmpProfile
             $snmp_profile = $input['snmpProfile'] ?? [];
+            if (isset($input['community'])) {
+                $snmp_profile['community'] = $input['community'];
+            }
 
             if (!$ip_address) {
                 http_response_code(400);
@@ -294,7 +299,7 @@ class Printer extends CI_Controller
         // $this->verify_token();
 
         try {
-            $deleted = $this->Printer_model->soft_delete($id);
+            $deleted = $this->Printer_model->delete($id);
 
             if (!$deleted) {
                 http_response_code(404);
@@ -312,6 +317,7 @@ class Printer extends CI_Controller
         }
     }
 
+
     public function test_snmp_oid()
     {
         if ($this->input->method() !== 'post') {
@@ -324,16 +330,34 @@ class Printer extends CI_Controller
             $input = json_decode($this->input->raw_input_stream, true);
 
             $ip_address = $input['ip'] ?? null;
-            $oid = $input['oid'] ?? null;
+            $oid = $input['oid'] ?? '1.3.6.1.2.1.1.5.0'; // Default: sysName
             $community = $input['community'] ?? 'public';
 
-            if (!$ip_address || !$oid) {
+            if (!$ip_address) {
                 http_response_code(400);
-                echo json_encode(['message' => 'IP address and OID are required']);
+                echo json_encode(['message' => 'IP address is required']);
                 return;
             }
 
+            // Predefined useful OIDs for quick testing
+            $common_oids = [
+                'sysName' => '1.3.6.1.2.1.1.5.0',
+                'sysDescr' => '1.3.6.1.2.1.1.1.0',
+                'sysUpTime' => '1.3.6.1.2.1.1.3.0',
+                'macAddress' => '1.3.6.1.2.1.2.2.1.6.2',
+                'printerStatus' => '1.3.6.1.2.1.25.3.5.1.1.1'
+            ];
+
+            // If OID is a key name, use the actual OID
+            if (isset($common_oids[$oid])) {
+                $oid = $common_oids[$oid];
+            }
+
             $result = $this->snmp_service->test_custom_oid($ip_address, $oid, $community);
+
+            // Add common OIDs info to response
+            $result['common_oids'] = $common_oids;
+
             echo json_encode($result);
         } catch (Exception $e) {
             http_response_code(500);

@@ -70,16 +70,18 @@ $route['api/alerts/(:num)/acknowledge'] = 'alert/acknowledge/$1';
 $route['api/alerts/(:num)'] = 'alert/delete/$1';
 
 // Printer routes
-$route['api/printers/testsnmp'] = 'printer/test_snmp_oid';
-$route['api/printers/test'] = 'printer/test_connection';
+// $route['api/printers/testsnmp'] = 'printer/test_snmp_oid';
+// $route['api/printers/test'] = 'printer/test_connection';
 $route['api/printers/(.+)/details'] = 'printer/details/$1';
 $route['api/printers/(.+)/delete'] = 'printer/delete_by_id/$1';
 $route['api/printers/(.+)'] = 'printer/show/$1';
 $route['api/printers'] = 'printer/index';
 
 // SNMP routes
-$route['api/snmp/test/(.+)'] = 'snmp/test/$1';
-$route['api/snmp/metrics/(.+)'] = 'snmp/metrics/$1';
-$route['api/snmp/scan-hp/(.+)'] = 'snmp/scan_hp/$1';
-$route['api/snmp/hp-web/(.+)'] = 'snmp/hp_web/$1';
-$route['api/snmp/profiles'] = 'snmp/profiles';
+$route['api/snmp/test-full'] = 'bulk/test_full_info';
+$route['api/snmp/test/(.+)'] = 'bulk/test/$1';
+$route['api/snmp/metrics/(.+)'] = 'bulk/metrics/$1';
+$route['api/snmp/scan-hp/(.+)'] = 'bulk/scan_hp/$1';
+$route['api/snmp/hp-web/(.+)'] = 'bulk/hp_web/$1';
+$route['api/snmp/profiles'] = 'bulk/profiles';
+$route['api/snmp/bulk-check'] = 'bulk/bulk_query';

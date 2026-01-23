@@ -65,6 +65,54 @@ class Snmp_service
         }
     }
 
+    public function check_internet_connection($ip_address, $community = 'public')
+    {
+        try {
+            // 1. Cek interface status (IF-MIB)
+            // ifOperStatus.1 = up(1), down(2)
+            $if_status = $this->snmp_get(
+                $ip_address,
+                $community,
+                '1.3.6.1.2.1.2.2.1.8.1'
+            );
+
+            if (!$if_status || (int) $if_status !== 1) {
+                return [
+                    'connected' => false,
+                    'reason' => 'Network interface down'
+                ];
+            }
+
+            // 2. Cek default gateway
+            // ipRouteNextHop
+            $gateway = $this->snmp_get(
+                $ip_address,
+                $community,
+                '1.3.6.1.2.1.4.21.1.7.0.0.0.0'
+            );
+
+            if (!$gateway) {
+                return [
+                    'connected' => false,
+                    'reason' => 'No default gateway'
+                ];
+            }
+
+            return [
+                'connected' => true,
+                'gateway' => $gateway,
+                'message' => 'Printer connected to network (internet assumed available)'
+            ];
+
+        } catch (Exception $e) {
+            return [
+                'connected' => false,
+                'error' => $e->getMessage()
+            ];
+        }
+    }
+
+
     public function get_printer_metrics($ip_address, $community = 'public')
     {
         try {
@@ -156,38 +204,36 @@ class Snmp_service
 
     public function get_printer_details($ip_address, $community = 'public')
     {
-        $timeout = 5000000;
-        $retries = 2;
         $data = [];
 
         try {
-            // 1. Printer Information - Using standard and HP-specific OIDs
+            // 1. Printer Information - Using standard Printer MIB OIDs
             $data['printer_info'] = [
                 'name' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.1.5.0'), // sysName
                 'model' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.25.3.2.1.3.1'), // hrDeviceDescr
                 'serial_number' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.5.1.1.17.1'), // prtGeneralSerialNumber
+                'printer_name' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.5.1.1.16.1'), // prtGeneralPrinterName (new in v2)
                 'engine_cycles' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.10.2.1.4.1.1'), // prtMarkerLifeCount
                 'firmware' => $this->snmp_get($ip_address, $community, '1.3.6.1.4.1.11.2.3.9.4.2.1.1.3.3.0'), // HP firmware
+                'console_display' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.16.5.1.2.1.1'), // prtConsoleDisplayBufferText
             ];
 
-            // 2. Memory Information - More comprehensive
-            $data['memory'] = [
-                'on_board' => $this->snmp_get($ip_address, $community, '1.3.6.1.4.1.11.2.3.9.4.2.1.1.1.4.1.0'), // HP onboard
-                'total_usable' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.25.2.3.1.5.1'), // hrStorageSize.1
-                'available' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.25.2.3.1.6.1'), // hrStorageUsed.1
-            ];
+            // 2. Memory Information
+            $data['memory'] = $this->get_memory_info($ip_address, $community);
 
-            // 3. Event Log
+            // 3. Event Log - Using correct Printer MIB OIDs
             $data['event_log'] = [
-                'max_entries' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.15.1.1.1.1'),
-                'current_entries' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.15.1.1.2.1'),
+                'max_entries' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.18.1.1.2.1'), // prtAlertTableMaximumSize
+                'current_entries' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.18.1.1.1.1'), // prtAlertIndex (count)
+                'critical_events' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.5.1.1.18.1'), // prtAlertCriticalEvents (new in v2)
+                'all_events' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.5.1.1.19.1'), // prtAlertAllEvents (new in v2)
             ];
 
-            // 4. Paper Trays - Enhanced
+            // 4. Paper Trays
             $data['paper_trays'] = $this->get_enhanced_paper_trays($ip_address, $community);
 
-            // 5. Cartridge/Ink Information - Auto-detect printer type
-            $data['cartridges'] = $this->get_printer_supplies($ip_address, $community);
+            // 5. Basic supplies info (toner levels)
+            $data['supplies'] = $this->get_basic_supplies($ip_address, $community);
 
             return [
                 'success' => true,
@@ -219,26 +265,38 @@ class Snmp_service
 
     private function get_memory_info($ip, $community)
     {
-        // Try to get onboard memory from HP-specific OID first
-        $onboard = $this->snmp_get($ip, $community, '1.3.6.1.4.1.11.2.3.9.4.2.1.1.1.4.1.0'); // HP onboard memory
+        // Try multiple memory OIDs for better compatibility
+        $memory_oids = [
+            'hp_onboard' => '1.3.6.1.4.1.11.2.3.9.4.2.1.1.1.4.1.0', // HP onboard memory
+            'prt_memory' => '1.3.6.1.2.1.43.5.1.1.3.1', // prtGeneralCurrentLocalization memory
+            'hr_memory' => '1.3.6.1.2.1.25.2.3.1.5.1', // hrStorageSize RAM
+        ];
+        
+        $onboard = null;
+        foreach ($memory_oids as $type => $oid) {
+            $result = $this->snmp_get($ip, $community, $oid);
+            if ($result !== null) {
+                $onboard = $result;
+                break;
+            }
+        }
 
+        // Try to get storage info with SNMP walk
         $sizes = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.25.2.3.1.5'); // hrStorageSize
         $descrs = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.25.2.3.1.3'); // hrStorageDescr
 
-        if ($sizes && $descrs) {
-            $total = 0;
+        $total = 0;
+        if ($sizes && is_array($sizes)) {
             foreach ($sizes as $oid => $size) {
-                $total += (int) $size;
+                if (is_numeric($size)) {
+                    $total += (int) $size;
+                }
             }
-            return [
-                'on_board' => $onboard ? $onboard . ' MB' : null,
-                'total_usable' => $total . ' Allocation Units'
-            ];
         }
 
         return [
-            'on_board' => $onboard ? $onboard . ' MB' : null,
-            'total_usable' => null
+            'on_board' => $onboard ? $onboard . ' MB' : 'Not available',
+            'total_usable' => $total > 0 ? $total . ' Allocation Units' : 'Not available'
         ];
     }
 
@@ -261,21 +319,75 @@ class Snmp_service
         $currents = $this->_snmp_walk($ip, $community, $tray_oids['current']);
         $medias = $this->_snmp_walk($ip, $community, $tray_oids['media']);
 
-        if ($names) {
+        if ($names && is_array($names)) {
             foreach ($names as $oid => $val) {
                 $idx = substr($oid, strrpos($oid, '.') + 1);
                 $cleanName = preg_replace('/^(STRING|Counter32|INTEGER):\s*"?/', '', $val);
                 $cleanName = trim($cleanName, '"');
 
+                // Try different OID formats for capacity and current level
+                $capacity_key = "iso.3.6.1.2.1.43.8.2.1.9.$idx";
+                $current_key = "iso.3.6.1.2.1.43.8.2.1.10.$idx";
+                $media_key = "iso.3.6.1.2.1.43.8.2.1.12.$idx";
+                
+                // Alternative key formats
+                if (!isset($capacities[$capacity_key])) {
+                    $capacity_key = "1.3.6.1.2.1.43.8.2.1.9.$idx";
+                }
+                if (!isset($currents[$current_key])) {
+                    $current_key = "1.3.6.1.2.1.43.8.2.1.10.$idx";
+                }
+                if (!isset($medias[$media_key])) {
+                    $media_key = "1.3.6.1.2.1.43.8.2.1.12.$idx";
+                }
+
                 $trays[] = [
                     'name' => $cleanName,
-                    'capacity' => isset($capacities["iso.3.6.1.2.1.43.8.2.1.9.$idx"]) ? (int) $capacities["iso.3.6.1.2.1.43.8.2.1.9.$idx"] : null,
-                    'current_level' => isset($currents["iso.3.6.1.2.1.43.8.2.1.10.$idx"]) ? (int) $currents["iso.3.6.1.2.1.43.8.2.1.10.$idx"] : null,
-                    'media_type' => isset($medias["iso.3.6.1.2.1.43.8.2.1.12.$idx"]) ? trim($medias["iso.3.6.1.2.1.43.8.2.1.12.$idx"], '"') : 'Plain'
+                    'capacity' => isset($capacities[$capacity_key]) ? (int) $capacities[$capacity_key] : 'Unknown',
+                    'current_level' => isset($currents[$current_key]) ? (int) $currents[$current_key] : 'Unknown',
+                    'media_type' => isset($medias[$media_key]) ? trim($medias[$media_key], '"') : 'Plain'
                 ];
             }
         }
         return $trays;
+    }
+
+    private function get_basic_supplies($ip, $community)
+    {
+        $supplies = [];
+        
+        // Try multiple supply level OIDs for better compatibility
+        $supply_oids = [
+            'black' => ['1.3.6.1.2.1.43.11.1.1.9.1.1', '1.3.6.1.2.1.43.11.1.1.9.1'],
+            'cyan' => ['1.3.6.1.2.1.43.11.1.1.9.1.2', '1.3.6.1.2.1.43.11.1.1.9.2'], 
+            'magenta' => ['1.3.6.1.2.1.43.11.1.1.9.1.3', '1.3.6.1.2.1.43.11.1.1.9.3'],
+            'yellow' => ['1.3.6.1.2.1.43.11.1.1.9.1.4', '1.3.6.1.2.1.43.11.1.1.9.4']
+        ];
+        
+        foreach ($supply_oids as $color => $oids) {
+            $level = null;
+            // Try each OID until we get a valid response
+            foreach ($oids as $oid) {
+                $result = $this->snmp_get($ip, $community, $oid);
+                if ($result !== null && is_numeric($result)) {
+                    $level = (int) $result;
+                    break;
+                }
+            }
+            
+            // If still no result, try HP-specific OIDs
+            if ($level === null) {
+                $hp_oid = '1.3.6.1.4.1.11.2.3.9.4.2.1.1.1.3.' . (array_search($color, array_keys($supply_oids)) + 1) . '.0';
+                $result = $this->snmp_get($ip, $community, $hp_oid);
+                if ($result !== null && is_numeric($result)) {
+                    $level = (int) $result;
+                }
+            }
+            
+            $supplies[$color] = $level !== null ? $level : 'Unknown';
+        }
+        
+        return $supplies;
     }
 
     private function get_printer_supplies($ip, $community)
