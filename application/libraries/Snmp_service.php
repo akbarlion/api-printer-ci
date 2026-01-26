@@ -229,10 +229,13 @@ class Snmp_service
                 'all_events' => $this->snmp_get($ip_address, $community, '1.3.6.1.2.1.43.5.1.1.19.1'), // prtAlertAllEvents (new in v2)
             ];
 
-            // 4. Paper Trays
-            $data['paper_trays'] = $this->get_enhanced_paper_trays($ip_address, $community);
+            // 4. Paper Trays and Options
+            $data['paper_trays'] = $this->get_paper_trays_info($ip_address, $community);
 
-            // 5. Basic supplies info (toner levels)
+            // 5. Cartridge Information
+            $data['cartridge_info'] = $this->get_cartridge_info($ip_address, $community);
+
+            // 6. Basic supplies info (toner levels)
             $data['supplies'] = $this->get_basic_supplies($ip_address, $community);
 
             return [
@@ -341,50 +344,233 @@ class Snmp_service
                     $media_key = "1.3.6.1.2.1.43.8.2.1.12.$idx";
                 }
 
+                $capacity = isset($capacities[$capacity_key]) ? $this->clean_snmp_value($capacities[$capacity_key]) : 'Unknown';
+                $current = isset($currents[$current_key]) ? $this->clean_snmp_value($currents[$current_key]) : 'Unknown';
+                $media = isset($medias[$media_key]) ? $this->clean_snmp_value($medias[$media_key]) : 'Unknown';
+
                 $trays[] = [
                     'name' => $cleanName,
-                    'capacity' => isset($capacities[$capacity_key]) ? (int) $capacities[$capacity_key] : 'Unknown',
-                    'current_level' => isset($currents[$current_key]) ? (int) $currents[$current_key] : 'Unknown',
-                    'media_type' => isset($medias[$media_key]) ? trim($medias[$media_key], '"') : 'Plain'
+                    'capacity' => $capacity,
+                    'current_level' => $current,
+                    'media_type' => $media,
+                    'percentage' => ($capacity !== 'Unknown' && $current !== 'Unknown' && $capacity > 0) 
+                        ? round(($current / $capacity) * 100, 1) . '%' 
+                        : 'Unknown'
                 ];
             }
         }
+
         return $trays;
+    }
+
+    private function get_paper_trays_info($ip, $community)
+    {
+        $paper_info = [];
+
+        // Default paper size
+        $default_size = $this->snmp_get($ip, $community, '1.3.6.1.2.1.43.8.2.1.6.1'); // prtInputDefaultIndex
+        $paper_info['default_paper_size'] = $default_size ?: 'A4';
+
+        // Tray information
+        $tray_names = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.43.8.2.1.18'); // prtInputName
+        $tray_types = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.43.8.2.1.2');  // prtInputType
+        $tray_sizes = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.43.8.2.1.6');  // prtInputMediaDimFeedDirDeclared
+
+        $trays = [];
+        if ($tray_names && is_array($tray_names)) {
+            $tray_count = 1;
+            foreach ($tray_names as $oid => $name) {
+                $idx = substr($oid, strrpos($oid, '.') + 1);
+                
+                $type_key = "iso.3.6.1.2.1.43.8.2.1.2.$idx";
+                $size_key = "iso.3.6.1.2.1.43.8.2.1.6.$idx";
+                
+                if (!isset($tray_types[$type_key])) {
+                    $type_key = "1.3.6.1.2.1.43.8.2.1.2.$idx";
+                }
+                if (!isset($tray_sizes[$size_key])) {
+                    $size_key = "1.3.6.1.2.1.43.8.2.1.6.$idx";
+                }
+
+                $tray_type = isset($tray_types[$type_key]) ? $this->parse_tray_type($tray_types[$type_key]) : 'Unknown';
+                $tray_size = isset($tray_sizes[$size_key]) ? $this->parse_paper_size($tray_sizes[$size_key]) : 'A4';
+
+                $trays["tray_{$tray_count}"] = [
+                    'name' => $this->clean_snmp_value($name),
+                    'type' => $tray_type,
+                    'size' => $tray_size
+                ];
+                $tray_count++;
+            }
+        }
+
+        // Ensure we have at least tray 1 and tray 2
+        if (!isset($trays['tray_1'])) {
+            $trays['tray_1'] = ['name' => 'Tray 1', 'type' => 'Auto', 'size' => 'A4'];
+        }
+        if (!isset($trays['tray_2'])) {
+            $trays['tray_2'] = ['name' => 'Tray 2', 'type' => 'Manual', 'size' => 'A4'];
+        }
+
+        $paper_info['trays'] = $trays;
+        return $paper_info;
+    }
+
+    private function get_cartridge_info($ip, $community)
+    {
+        $cartridge_info = [];
+
+        // Supply levels (toner/ink)
+        $supply_levels = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.43.11.1.1.9'); // prtMarkerSuppliesLevel
+        $supply_max = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.43.11.1.1.8');   // prtMarkerSuppliesMaxCapacity
+        $supply_desc = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.43.11.1.1.6');  // prtMarkerSuppliesDescription
+        $supply_serial = $this->_snmp_walk($ip, $community, '1.3.6.1.2.1.43.11.1.1.7'); // prtMarkerSuppliesSupplyUnit
+
+        // Pages printed
+        $pages_printed = $this->snmp_get($ip, $community, '1.3.6.1.2.1.43.10.2.1.4.1.1'); // prtMarkerLifeCount
+        
+        // Install date and last used (try different OIDs)
+        $install_date = $this->snmp_get($ip, $community, '1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.6.0'); // HP specific
+        $last_used = $this->snmp_get($ip, $community, '1.3.6.1.2.1.1.3.0'); // sysUpTime as fallback
+
+        $cartridges = [];
+        if ($supply_levels && is_array($supply_levels)) {
+            $cartridge_count = 1;
+            foreach ($supply_levels as $oid => $level) {
+                $idx = substr($oid, strrpos($oid, '.') + 1);
+                
+                $max_key = "iso.3.6.1.2.1.43.11.1.1.8.$idx";
+                $desc_key = "iso.3.6.1.2.1.43.11.1.1.6.$idx";
+                $serial_key = "iso.3.6.1.2.1.43.11.1.1.7.$idx";
+                
+                if (!isset($supply_max[$max_key])) {
+                    $max_key = "1.3.6.1.2.1.43.11.1.1.8.$idx";
+                }
+                if (!isset($supply_desc[$desc_key])) {
+                    $desc_key = "1.3.6.1.2.1.43.11.1.1.6.$idx";
+                }
+                if (!isset($supply_serial[$serial_key])) {
+                    $serial_key = "1.3.6.1.2.1.43.11.1.1.7.$idx";
+                }
+
+                $current_level = $this->clean_snmp_value($level);
+                $max_capacity = isset($supply_max[$max_key]) ? $this->clean_snmp_value($supply_max[$max_key]) : 100;
+                $description = isset($supply_desc[$desc_key]) ? $this->clean_snmp_value($supply_desc[$desc_key]) : "Cartridge $cartridge_count";
+                $serial = isset($supply_serial[$serial_key]) ? $this->clean_snmp_value($supply_serial[$serial_key]) : 'Unknown';
+
+                $percentage = ($max_capacity > 0) ? round(($current_level / $max_capacity) * 100, 1) : 0;
+
+                $cartridges[] = [
+                    'description' => $description,
+                    'supply_level' => $percentage . '%',
+                    'pages_printed' => $pages_printed ?: 'Unknown',
+                    'cartridge_serial' => $serial,
+                    'cartridge_install_date' => $install_date ?: 'Unknown',
+                    'last_used_date' => $this->format_uptime($last_used)
+                ];
+                $cartridge_count++;
+            }
+        }
+
+        // If no cartridges found, add default ones
+        if (empty($cartridges)) {
+            $colors = ['Black', 'Cyan', 'Magenta', 'Yellow'];
+            foreach ($colors as $color) {
+                $cartridges[] = [
+                    'description' => "$color Toner",
+                    'supply_level' => 'Unknown',
+                    'pages_printed' => $pages_printed ?: 'Unknown',
+                    'cartridge_serial' => 'Unknown',
+                    'cartridge_install_date' => 'Unknown',
+                    'last_used_date' => $this->format_uptime($last_used)
+                ];
+            }
+        }
+
+        return $cartridges;
+    }
+
+    private function parse_tray_type($type_value)
+    {
+        $type = $this->clean_snmp_value($type_value);
+        $types = [
+            '1' => 'Other',
+            '2' => 'Unknown',
+            '3' => 'Sheet Feed Auto Removable Tray',
+            '4' => 'Sheet Feed Auto Non-Removable Tray',
+            '5' => 'Sheet Feed Manual',
+            '6' => 'Continuous Roll',
+            '7' => 'Continuous Fan Fold'
+        ];
+        return isset($types[$type]) ? $types[$type] : 'Auto';
+    }
+
+    private function parse_paper_size($size_value)
+    {
+        $size = $this->clean_snmp_value($size_value);
+        // Convert from micrometers or other units to standard paper sizes
+        $sizes = [
+            '210000' => 'A4',
+            '215900' => 'Letter',
+            '148000' => 'A5',
+            '297000' => 'A4',
+            '279400' => 'Letter'
+        ];
+        return isset($sizes[$size]) ? $sizes[$size] : 'A4';
+    }
+
+    private function format_uptime($uptime)
+    {
+        if (!$uptime || $uptime === 'Unknown') {
+            return 'Unknown';
+        }
+        
+        $uptime = $this->clean_snmp_value($uptime);
+        if (is_numeric($uptime)) {
+            $seconds = intval($uptime) / 100; // Convert from centiseconds
+            $days = floor($seconds / 86400);
+            return "$days days ago";
+        }
+        return 'Unknown';
+    }
+
+    private function clean_snmp_value($value)
+    {
+        if ($value === false || $value === null) {
+            return 'Unknown';
+        }
+        
+        $cleaned = trim(trim($value, '"'), ' ');
+        $cleaned = preg_replace('/^(STRING|Counter32|INTEGER|Gauge32|TimeTicks):\s*"?/', '', $cleaned);
+        $cleaned = trim($cleaned, '"');
+        return $cleaned;
     }
 
     private function get_basic_supplies($ip, $community)
     {
         $supplies = [];
         
-        // Try multiple supply level OIDs for better compatibility
-        $supply_oids = [
-            'black' => ['1.3.6.1.2.1.43.11.1.1.9.1.1', '1.3.6.1.2.1.43.11.1.1.9.1'],
-            'cyan' => ['1.3.6.1.2.1.43.11.1.1.9.1.2', '1.3.6.1.2.1.43.11.1.1.9.2'], 
-            'magenta' => ['1.3.6.1.2.1.43.11.1.1.9.1.3', '1.3.6.1.2.1.43.11.1.1.9.3'],
-            'yellow' => ['1.3.6.1.2.1.43.11.1.1.9.1.4', '1.3.6.1.2.1.43.11.1.1.9.4']
+        // Get toner levels using standard OIDs
+        $toner_oids = [
+            '1.3.6.1.2.1.43.11.1.1.9.1.1', // Black
+            '1.3.6.1.2.1.43.11.1.1.9.1.2', // Cyan  
+            '1.3.6.1.2.1.43.11.1.1.9.1.3', // Magenta
+            '1.3.6.1.2.1.43.11.1.1.9.1.4'  // Yellow
         ];
         
-        foreach ($supply_oids as $color => $oids) {
-            $level = null;
-            // Try each OID until we get a valid response
-            foreach ($oids as $oid) {
-                $result = $this->snmp_get($ip, $community, $oid);
-                if ($result !== null && is_numeric($result)) {
-                    $level = (int) $result;
-                    break;
-                }
+        $colors = ['black', 'cyan', 'magenta', 'yellow'];
+        
+        foreach ($toner_oids as $i => $oid) {
+            $level = $this->snmp_get($ip, $community, $oid);
+            if ($level !== null && is_numeric($level)) {
+                $supplies['toner'][$colors[$i]] = (int) $level;
             }
-            
-            // If still no result, try HP-specific OIDs
-            if ($level === null) {
-                $hp_oid = '1.3.6.1.4.1.11.2.3.9.4.2.1.1.1.3.' . (array_search($color, array_keys($supply_oids)) + 1) . '.0';
-                $result = $this->snmp_get($ip, $community, $hp_oid);
-                if ($result !== null && is_numeric($result)) {
-                    $level = (int) $result;
-                }
-            }
-            
-            $supplies[$color] = $level !== null ? $level : 'Unknown';
+        }
+        
+        // Paper level
+        $paper_level = $this->snmp_get($ip, $community, '1.3.6.1.2.1.43.8.2.1.10.1.1');
+        if ($paper_level !== null && is_numeric($paper_level)) {
+            $supplies['paper_level'] = (int) $paper_level;
         }
         
         return $supplies;
